@@ -1,0 +1,1 @@
+# global_ci_template
