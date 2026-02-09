@@ -3,9 +3,6 @@ name: Build & Push Image on Tag (ACR)
 on:
   workflow_call:
     inputs:
-      image_name:
-        required: true
-        type: string
       dockerfile:
         required: false
         type: string
@@ -23,27 +20,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Checkout CALLING repo code (important)
       - uses: actions/checkout@v4
 
-      - name: Extract tag name
-        id: tag
-        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      - name: Extract repo name & tag
+        id: meta
+        run: |
+          echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_OUTPUT
+          echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Login to ACR
+      - name: Login to Azure Container Registry
         run: |
           echo "${{ secrets.ACR_PASSWORD }}" | \
           docker login ${{ secrets.ACR_REGISTRY }} \
             --username ${{ secrets.ACR_USERNAME }} \
             --password-stdin
 
-      - name: Build image
+      - name: Build Docker image
         run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ inputs.image_name }}:${{ steps.tag.outputs.TAG }}
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ steps.meta.outputs.REPO_NAME }}:${{ steps.meta.outputs.TAG }}
           docker build -t $IMAGE -f ${{ inputs.dockerfile }} .
 
-      - name: Push image
+      - name: Push Docker image
         run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ inputs.image_name }}:${{ steps.tag.outputs.TAG }}
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ steps.meta.outputs.REPO_NAME }}:${{ steps.meta.outputs.TAG }}
           docker push $IMAGE
 
       - name: Logout
