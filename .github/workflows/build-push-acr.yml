@@ -1,0 +1,50 @@
+name: Build & Push Image on Tag (ACR)
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        required: true
+        type: string
+      dockerfile:
+        required: false
+        type: string
+        default: Dockerfile
+    secrets:
+      ACR_REGISTRY:
+        required: true
+      ACR_USERNAME:
+        required: true
+      ACR_PASSWORD:
+        required: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract tag name
+        id: tag
+        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Login to ACR
+        run: |
+          echo "${{ secrets.ACR_PASSWORD }}" | \
+          docker login ${{ secrets.ACR_REGISTRY }} \
+            --username ${{ secrets.ACR_USERNAME }} \
+            --password-stdin
+
+      - name: Build image
+        run: |
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ inputs.image_name }}:${{ steps.tag.outputs.TAG }}
+          docker build -t $IMAGE -f ${{ inputs.dockerfile }} .
+
+      - name: Push image
+        run: |
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ inputs.image_name }}:${{ steps.tag.outputs.TAG }}
+          docker push $IMAGE
+
+      - name: Logout
+        run: docker logout ${{ secrets.ACR_REGISTRY }}
