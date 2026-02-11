@@ -31,6 +31,32 @@ jobs:
         run: |
           echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
+      # 🔍 DEBUG 1: confirm secrets are present
+      - name: Debug secrets presence (safe)
+        env:
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          for var in ACR_REGISTRY ACR_USERNAME ACR_PASSWORD; do
+            if [ -z "${!var}" ]; then
+              echo "❌ $var is EMPTY"
+            else
+              echo "✅ $var is SET (length: ${#var})"
+            fi
+          done
+
+      # 🔍 DEBUG 2: sanity-check registry format
+      - name: Debug ACR registry value
+        run: |
+          echo "Using ACR registry: '${{ secrets.ACR_REGISTRY }}'"
+
+      # 🔍 DEBUG 3: dry-run docker login command (no password)
+      - name: Debug docker login command
+        run: |
+          echo "docker login ${{ secrets.ACR_REGISTRY }} --username ${{ secrets.ACR_USERNAME }} --password-stdin"
+
+      # 🔐 Actual login
       - name: Login to Azure Container Registry
         run: |
           echo "${{ secrets.ACR_PASSWORD }}" | \
@@ -41,6 +67,7 @@ jobs:
       - name: Build image
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          echo "Building image: $IMAGE"
           docker build \
             -f ${{ matrix.image.dockerfile }} \
             -t $IMAGE \
@@ -49,6 +76,7 @@ jobs:
       - name: Push image
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          echo "Pushing image: $IMAGE"
           docker push $IMAGE
 
       - name: Logout
