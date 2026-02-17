@@ -23,7 +23,22 @@ jobs:
         image: ${{ fromJson(inputs.images) }}
 
     steps:
-      # Checkout CALLING repo
+      # ✅ STEP 1: FREE DISK SPACE (MUST BE FIRST)
+      - name: Free disk space
+        run: |
+          echo "Before cleanup:"
+          df -h
+
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo docker system prune -af || true
+
+          echo "After cleanup:"
+          df -h
+
+      # STEP 2: Checkout CALLING repo
       - uses: actions/checkout@v4
 
       - name: Extract tag
@@ -42,21 +57,10 @@ jobs:
             if [ -z "${!var}" ]; then
               echo "❌ $var is EMPTY"
             else
-              echo "✅ $var is SET (length: ${#var})"
+              echo "✅ $var is SET"
             fi
           done
 
-      # 🔍 DEBUG 2: sanity-check registry format
-      - name: Debug ACR registry value
-        run: |
-          echo "Using ACR registry: '${{ secrets.ACR_REGISTRY }}'"
-
-      # 🔍 DEBUG 3: dry-run docker login command (no password)
-      - name: Debug docker login command
-        run: |
-          echo "docker login ${{ secrets.ACR_REGISTRY }} --username ${{ secrets.ACR_USERNAME }} --password-stdin"
-
-      # 🔐 Actual login
       - name: Login to Azure Container Registry
         run: |
           echo "${{ secrets.ACR_PASSWORD }}" | \
