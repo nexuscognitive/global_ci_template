@@ -15,6 +15,7 @@ on:
         required: true
       NPM_TOKEN:
         required: false
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -47,7 +48,7 @@ jobs:
         run: |
           echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      # 🔍 DEBUG 1: confirm secrets are present
+      # 🔍 DEBUG: confirm required secrets are present
       - name: Debug secrets presence (safe)
         env:
           ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
@@ -69,11 +70,29 @@ jobs:
             --username ${{ secrets.ACR_USERNAME }} \
             --password-stdin
 
+      # ✅ SMART BUILD STEP (Supports Optional NPM_TOKEN)
       - name: Build image
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
           echo "Building image: $IMAGE"
+
+          BUILD_ARGS=""
+
+          # Only pass NPM_TOKEN if image explicitly requests it
+          if [ "${{ matrix.image.build_args }}" = "NPM_TOKEN" ]; then
+            if [ -n "${{ secrets.NPM_TOKEN }}" ]; then
+              echo "Using NPM_TOKEN build argument"
+              BUILD_ARGS="--build-arg NPM_TOKEN=${{ secrets.NPM_TOKEN }}"
+            else
+              echo "⚠️ Image requires NPM_TOKEN but secret is not set"
+              exit 1
+            fi
+          else
+            echo "No build arguments required"
+          fi
+
           docker build \
+            $BUILD_ARGS \
             -f ${{ matrix.image.dockerfile }} \
             -t $IMAGE \
             ${{ matrix.image.context }}
