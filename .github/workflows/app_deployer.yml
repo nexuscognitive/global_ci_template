@@ -1,4 +1,5 @@
 name: NX1 App Deploy Template
+run-name: NX1 App Deploy
 
 on:
   workflow_call:
