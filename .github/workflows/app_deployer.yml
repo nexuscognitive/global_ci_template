@@ -1,0 +1,169 @@
+name: NX1 App Deploy Template
+run-name: NX1 App Deploy
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: "App name (defaults to repo name)"
+        required: false
+        type: string
+
+      version:
+        description: "App version (defaults to tag name)"
+        required: false
+        type: string
+
+      dags_dir:
+        description: "Directory containing DAG files"
+        required: false
+        default: "dags"
+        type: string
+
+      dags_files:
+        description: "Comma-separated DAG file names (optional)"
+        required: false
+        type: string
+
+      artifacts_dir:
+        description: "Directory containing artifact files"
+        required: false
+        default: "artifacts"
+        type: string
+
+      artifacts_files:
+        description: "Comma-separated artifact file names (optional)"
+        required: false
+        type: string
+
+    secrets:
+      NX1_API_KEY:
+        required: true
+
+      NX1_HOST:
+        required: true
+
+
+jobs:
+  deploy:
+    name: Deploy NX1 App
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+
+      - name: Determine App Name
+        run: |
+          if [[ -n "${{ inputs.app_name }}" ]]; then
+            APP_NAME="${{ inputs.app_name }}"
+          else
+            APP_NAME="${GITHUB_REPOSITORY##*/}"
+          fi
+
+          echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
+          echo "Using App Name: $APP_NAME"
+
+
+      - name: Determine Version
+        run: |
+          if [[ -n "${{ inputs.version }}" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Using Version: $VERSION"
+
+
+      - name: Prepare DAG & Artifact Paths
+        run: |
+
+          DAGS_DIR="${{ inputs.dags_dir }}"
+          DAGS_FILES="${{ inputs.dags_files }}"
+
+          ARTIFACTS_DIR="${{ inputs.artifacts_dir }}"
+          ARTIFACTS_FILES="${{ inputs.artifacts_files }}"
+
+
+          # DAG FILES
+          if [[ -z "$DAGS_FILES" ]]; then
+            if [[ -d "$DAGS_DIR" ]]; then
+              FULL_DAGS=$(find "$DAGS_DIR" -type f | paste -sd "," -)
+            else
+              FULL_DAGS=""
+            fi
+          else
+            FULL_DAGS=""
+            for file in $(echo $DAGS_FILES | tr ',' ' '); do
+              FULL_DAGS="$FULL_DAGS,$DAGS_DIR/$file"
+            done
+            FULL_DAGS=${FULL_DAGS:1}
+          fi
+
+
+          # ARTIFACT FILES
+          if [[ -z "$ARTIFACTS_FILES" ]]; then
+            if [[ -d "$ARTIFACTS_DIR" ]]; then
+              FULL_ARTIFACTS=$(find "$ARTIFACTS_DIR" -type f | paste -sd "," -)
+            else
+              FULL_ARTIFACTS=""
+            fi
+          else
+            FULL_ARTIFACTS=""
+            for file in $(echo $ARTIFACTS_FILES | tr ',' ' '); do
+              FULL_ARTIFACTS="$FULL_ARTIFACTS,$ARTIFACTS_DIR/$file"
+            done
+            FULL_ARTIFACTS=${FULL_ARTIFACTS:1}
+          fi
+
+
+          echo "FULL_DAGS=$FULL_DAGS" >> $GITHUB_ENV
+          echo "FULL_ARTIFACTS=$FULL_ARTIFACTS" >> $GITHUB_ENV
+
+          echo "DAGs: $FULL_DAGS"
+          echo "Artifacts: $FULL_ARTIFACTS"
+
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+
+      - name: Install NX1 SDK
+        run: |
+          pip install --upgrade pip
+          pip install git+https://github.com/nexuscognitive/nx1-sdk
+
+
+      - name: Package Dependencies
+        run: |
+          if [ -d "deps" ]; then
+            tar -czf deps.tar.gz deps/
+            echo "DEPS_ARCHIVE=deps.tar.gz" >> $GITHUB_ENV
+          else
+            echo "DEPS_ARCHIVE=" >> $GITHUB_ENV
+          fi
+
+
+      - name: Deploy App
+        env:
+          NX1_API_KEY: ${{ secrets.NX1_API_KEY }}
+          NX1_HOST: ${{ secrets.NX1_HOST }}
+        run: |
+
+          FILES="$FULL_ARTIFACTS"
+
+          if [[ -n "$DEPS_ARCHIVE" ]]; then
+            FILES="$DEPS_ARCHIVE,$FILES"
+          fi
+
+          nx1 apps deploy \
+            --app-name "$APP_NAME" \
+            --version "$VERSION" \
+            --dags "$FULL_DAGS" \
+            --artifacts "$FILES"
