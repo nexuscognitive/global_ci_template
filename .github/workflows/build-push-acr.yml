@@ -1,4 +1,4 @@
-name: Build & Push Image on Tag (ACR)
+name: Build & Push Image with trivy scan on Tag (ACR)
 
 on:
   workflow_call:
@@ -15,6 +15,7 @@ on:
         required: true
       NPM_TOKEN:
         required: false
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -24,22 +25,18 @@ jobs:
         image: ${{ fromJson(inputs.images) }}
 
     steps:
-      # ✅ STEP 1: FREE DISK SPACE (MUST BE FIRST)
       - name: Free disk space
         run: |
           echo "Before cleanup:"
           df -h
-
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache
           sudo docker system prune -af || true
-
           echo "After cleanup:"
           df -h
 
-      # STEP 2: Checkout CALLING repo
       - uses: actions/checkout@v4
 
       - name: Extract tag
@@ -47,7 +44,6 @@ jobs:
         run: |
           echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      # 🔍 DEBUG 1: confirm secrets are present
       - name: Debug secrets presence (safe)
         env:
           ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
@@ -84,5 +80,19 @@ jobs:
           echo "Pushing image: $IMAGE"
           docker push $IMAGE
 
+      - name: Trivy vulnerability scan
+        run: |
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          echo "🔍 Running Trivy scan on: $IMAGE"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $HOME/.cache/trivy:/root/.cache/ \
+            aquasec/trivy:0.69.1 image "$IMAGE" \
+            --timeout 20m \
+            --exit-code 0 \
+            --severity LOW,MEDIUM,HIGH,CRITICAL \
+            --format table
+
       - name: Logout
+        if: always()
         run: docker logout ${{ secrets.ACR_REGISTRY }}
