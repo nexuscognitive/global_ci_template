@@ -83,6 +83,19 @@ jobs:
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
           echo "Pushing image: $IMAGE"
           docker push $IMAGE
+      - name: Trivy vulnerability scan
+        run: |
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          echo "🔍 Running Trivy scan on: $IMAGE"
+
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $HOME/.cache/trivy:/root/.cache/ \
+            aquasec/trivy:0.69.1 image "$IMAGE" \
+            --timeout 20m \
+            --exit-code 0 \
+            --severity LOW,MEDIUM,HIGH,CRITICAL \
+            --format table
 
       - name: Logout
         run: docker logout ${{ secrets.ACR_REGISTRY }}
