@@ -1,0 +1,98 @@
+name: Build & Push Image with trivy scan on Tag (ACR)
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        required: true
+        type: string
+    secrets:
+      ACR_REGISTRY:
+        required: true
+      ACR_USERNAME:
+        required: true
+      ACR_PASSWORD:
+        required: true
+      NPM_TOKEN:
+        required: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        image: ${{ fromJson(inputs.images) }}
+
+    steps:
+      - name: Free disk space
+        run: |
+          echo "Before cleanup:"
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          echo "After cleanup:"
+          df -h
+
+      - uses: actions/checkout@v4
+
+      - name: Extract tag
+        id: meta
+        run: |
+          echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Debug secrets presence (safe)
+        env:
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          for var in ACR_REGISTRY ACR_USERNAME ACR_PASSWORD; do
+            if [ -z "${!var}" ]; then
+              echo "❌ $var is EMPTY"
+            else
+              echo "✅ $var is SET"
+            fi
+          done
+
+      - name: Login to Azure Container Registry
+        run: |
+          echo "${{ secrets.ACR_PASSWORD }}" | \
+          docker login ${{ secrets.ACR_REGISTRY }} \
+            --username ${{ secrets.ACR_USERNAME }} \
+            --password-stdin
+
+      - name: Build image
+        run: |
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          echo "Building image: $IMAGE"
+          docker build \
+            -f ${{ matrix.image.dockerfile }} \
+            -t $IMAGE \
+            ${{ matrix.image.context }}
+
+      - name: Push image
+        run: |
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          echo "Pushing image: $IMAGE"
+          docker push $IMAGE
+
+      - name: Trivy vulnerability scan
+        run: |
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          echo "🔍 Running Trivy scan on: $IMAGE"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $HOME/.cache/trivy:/root/.cache/ \
+            aquasec/trivy:0.69.1 image "$IMAGE" \
+            --timeout 20m \
+            --exit-code 0 \
+            --severity LOW,MEDIUM,HIGH,CRITICAL \
+            --format table
+
+      - name: Logout
+        if: always()
+        run: docker logout ${{ secrets.ACR_REGISTRY }}
