@@ -74,24 +74,27 @@ jobs:
             -t $IMAGE \
             ${{ matrix.image.context }}
 
-      - name: Push image
-        run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
-          echo "Pushing image: $IMAGE"
-          docker push $IMAGE
-
-      - name: Trivy vulnerability scan
+      # ✅ Scan BEFORE push (fails pipeline if vulnerable)
+      - name: Trivy vulnerability scan (fail on HIGH/CRITICAL)
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
           echo "🔍 Running Trivy scan on: $IMAGE"
+
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v $HOME/.cache/trivy:/root/.cache/ \
             aquasec/trivy:0.69.1 image "$IMAGE" \
             --timeout 20m \
-            --exit-code 0 \
-            --severity LOW,MEDIUM,HIGH,CRITICAL \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
             --format table
+
+      # ✅ Push ONLY if scan passes
+      - name: Push image
+        run: |
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          echo "Pushing image: $IMAGE"
+          docker push $IMAGE
 
       - name: Logout
         if: always()
