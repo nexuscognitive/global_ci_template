@@ -89,8 +89,8 @@ jobs:
             -v $HOME/.cache/trivy:/root/.cache/ \
             aquasec/trivy:0.69.1 image "$IMAGE" \
             --timeout 20m \
-            --exit-code 0 \
-            --severity LOW,MEDIUM,HIGH,CRITICAL \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
             --format table
 
       - name: Logout
