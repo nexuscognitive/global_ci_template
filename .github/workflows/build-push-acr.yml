@@ -6,6 +6,11 @@ on:
       images:
         required: true
         type: string
+      lfs:
+        description: 'Enable Git LFS checkout'
+        required: false
+        default: false
+        type: boolean
     secrets:
       ACR_REGISTRY:
         required: true
@@ -38,6 +43,8 @@ jobs:
           df -h
 
       - uses: actions/checkout@v4
+        with:
+          lfs: ${{ inputs.lfs }}
 
       - name: Extract tag
         id: meta
