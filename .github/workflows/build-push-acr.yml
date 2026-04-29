@@ -82,6 +82,18 @@ jobs:
             -t $IMAGE \
             ${{ matrix.image.context }}
 
+      - name: Install docker-squash
+        run: pip install docker-squash
+
+      - name: Squash image
+        run: |
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          echo "Size before squash:"
+          docker image inspect "$IMAGE" --format '{{.Size}}' | numfmt --to=iec
+          docker-squash -t "$IMAGE" "$IMAGE"
+          echo "Size after squash:"
+          docker image inspect "$IMAGE" --format '{{.Size}}' | numfmt --to=iec
+
       - name: Push image
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
