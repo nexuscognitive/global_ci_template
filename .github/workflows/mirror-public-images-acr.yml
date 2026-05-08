@@ -1,0 +1,105 @@
+name: Mirror Public Images to ACR
+
+on:
+  workflow_dispatch:
+    inputs:
+      images:
+        description: |
+          JSON array of images to mirror. The registry/org prefix is stripped automatically
+          and the image is retagged under ACR. Only name:tag is preserved.
+
+          Examples:
+            [{"image":"spark:3.5.1"}]
+            [{"image":"spark:3.5.1"},{"image":"minio/minio:RELEASE.2024-01-01"},{"image":"exampleregistry.io/airflow:2.9.0"}]
+
+          All of the above produce:  <ACR_REGISTRY>/spark:3.5.1, <ACR_REGISTRY>/minio:RELEASE.2024-01-01, <ACR_REGISTRY>/airflow:2.9.0
+        required: true
+        type: string
+
+jobs:
+  mirror:
+    name: Mirror ${{ matrix.image.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    strategy:
+      matrix:
+        image: ${{ fromJson(inputs.images) }}
+      fail-fast: false
+
+    steps:
+      - name: Free disk space
+        run: |
+          echo "Disk before cleanup:"
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          echo "Disk after cleanup:"
+          df -h
+
+      - name: Validate input
+        run: |
+          if [ -z "${{ matrix.image.image }}" ]; then
+            echo "❌ 'image' field is required for every entry"
+            exit 1
+          fi
+          echo "✅ image: ${{ matrix.image.image }}"
+
+      - name: Debug ACR secrets presence
+        env:
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          for var in ACR_REGISTRY ACR_USERNAME ACR_PASSWORD; do
+            if [ -z "${!var}" ]; then
+              echo "❌ $var is EMPTY"
+              exit 1
+            else
+              echo "✅ $var is SET"
+            fi
+          done
+
+      - name: Resolve name:tag
+        id: resolve
+        run: |
+          SOURCE="${{ matrix.image.image }}"
+          # Strip everything up to and including the last '/' to get just name:tag
+          NAME_TAG="${SOURCE##*/}"
+          echo "source=$SOURCE"     >> $GITHUB_OUTPUT
+          echo "name_tag=$NAME_TAG" >> $GITHUB_OUTPUT
+          echo "Resolved: $SOURCE → <ACR_REGISTRY>/$NAME_TAG"
+
+      - name: Login to Azure Container Registry
+        run: |
+          echo "${{ secrets.ACR_PASSWORD }}" | \
+            docker login "${{ secrets.ACR_REGISTRY }}" \
+              --username "${{ secrets.ACR_USERNAME }}" \
+              --password-stdin
+
+      - name: Pull public image
+        run: |
+          echo "Pulling: ${{ steps.resolve.outputs.source }}"
+          docker pull "${{ steps.resolve.outputs.source }}"
+
+      - name: Retag image for ACR
+        run: |
+          ACR_IMAGE="${{ secrets.ACR_REGISTRY }}/${{ steps.resolve.outputs.name_tag }}"
+          docker tag "${{ steps.resolve.outputs.source }}" "$ACR_IMAGE"
+          echo "Tagged: ${{ steps.resolve.outputs.source }} → $ACR_IMAGE"
+
+      - name: Push image to ACR
+        run: |
+          ACR_IMAGE="${{ secrets.ACR_REGISTRY }}/${{ steps.resolve.outputs.name_tag }}"
+          echo "Pushing: $ACR_IMAGE"
+          docker push "$ACR_IMAGE"
+
+      - name: Mirror summary
+        run: |
+          echo "✅ Successfully mirrored:"
+          echo "   Source : ${{ steps.resolve.outputs.source }}"
+          echo "   Target : ${{ secrets.ACR_REGISTRY }}/${{ steps.resolve.outputs.name_tag }}"
+
+      - name: Logout from ACR
+        if: always()
+        run: docker logout "${{ secrets.ACR_REGISTRY }}"
