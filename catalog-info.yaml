@@ -1,0 +1,16 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: global-ci-template
+  description: Shared GitHub Actions CI/CD workflow templates for NX1 repos
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+    github.com/project-slug: nexuscognitive/global_ci_template
+  tags:
+    - github-actions
+    - ci-cd
+spec:
+  type: template
+  lifecycle: production
+  owner: nx1-platform-team
+  system: nx1-infra

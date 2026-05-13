@@ -1,0 +1,5 @@
+site_name: global-ci-template
+plugins:
+  - techdocs-core
+nav:
+  - Overview: README.md
