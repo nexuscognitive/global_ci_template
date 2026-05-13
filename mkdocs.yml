@@ -1,4 +1,5 @@
 site_name: global-ci-template
+docs_dir: .
 plugins:
   - techdocs-core
 nav:
