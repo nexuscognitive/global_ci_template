@@ -20,6 +20,18 @@ on:
         required: true
       NPM_TOKEN:
         required: false
+      TRINO_HOST:
+        required: false
+      TRINO_USER:
+        required: false
+      TRINO_PASSWORD:
+        required: false
+      TRINO_CATALOG:
+        required: false
+      TRINO_SCHEMA:
+        required: false
+      TRINO_TABLE:
+        required: false
 
 jobs:
   build-and-push:
@@ -104,6 +116,18 @@ jobs:
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
           echo "🔍 Running Trivy scan on: $IMAGE"
+          mkdir -p trivy-out
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $HOME/.cache/trivy:/root/.cache/ \
+            -v "$PWD/trivy-out":/out \
+            aquasec/trivy:0.69.1 image "$IMAGE" \
+            --timeout 20m \
+            --exit-code 0 \
+            --severity LOW,MEDIUM,HIGH,CRITICAL \
+            --format json \
+            --output /out/trivy.json
+          echo "📄 Rendering table view for the log:"
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v $HOME/.cache/trivy:/root/.cache/ \
@@ -111,7 +135,222 @@ jobs:
             --timeout 20m \
             --exit-code 0 \
             --severity HIGH,CRITICAL \
-            --format table
+            --format table || true
+
+      - name: Upload Trivy results to Trino
+        if: always()
+        continue-on-error: true
+        env:
+          TRINO_HOST: ${{ secrets.TRINO_HOST }}
+          TRINO_USER: ${{ secrets.TRINO_USER }}
+          TRINO_PASSWORD: ${{ secrets.TRINO_PASSWORD }}
+          TRINO_CATALOG: ${{ secrets.TRINO_CATALOG }}
+          TRINO_SCHEMA: ${{ secrets.TRINO_SCHEMA }}
+          TRINO_TABLE: ${{ secrets.TRINO_TABLE }}
+          IMAGE_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          IMAGE_NAME: ${{ matrix.image.name }}
+          IMAGE_TAG: ${{ steps.meta.outputs.TAG }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ ! -s trivy-out/trivy.json ]; then
+            echo "::warning::trivy-out/trivy.json missing or empty; skipping Trino upload"
+            exit 0
+          fi
+          missing=0
+          for v in TRINO_HOST TRINO_USER TRINO_PASSWORD TRINO_CATALOG TRINO_SCHEMA TRINO_TABLE; do
+            if [ -z "${!v:-}" ]; then
+              echo "::warning::$v is not set; skipping Trino upload"
+              missing=1
+            fi
+          done
+          [ "$missing" = "1" ] && exit 0
+          python3 -m pip install --quiet 'trino==0.328.0'
+          python3 - <<'PY'
+          import datetime, json, os, sys
+          from trino.dbapi import connect
+          from trino.auth import BasicAuthentication
+
+          host = os.environ["TRINO_HOST"]
+          if ":" in host:
+              h, port_s = host.rsplit(":", 1)
+              port = int(port_s)
+          else:
+              h, port = host, 443
+
+          user = os.environ["TRINO_USER"]
+          password = os.environ["TRINO_PASSWORD"]
+          catalog = os.environ["TRINO_CATALOG"]
+          schema = os.environ["TRINO_SCHEMA"]
+          table = os.environ["TRINO_TABLE"]
+
+          registry = os.environ["IMAGE_REGISTRY"]
+          image_name = os.environ["IMAGE_NAME"]
+          image_tag = os.environ["IMAGE_TAG"]
+          image_full = f"{registry}/{image_name}:{image_tag}"
+          gh_repo = os.environ.get("GH_REPOSITORY", "")
+          gh_run = os.environ.get("GH_RUN_ID", "")
+          gh_sha = os.environ.get("GH_SHA", "")
+
+          with open("trivy-out/trivy.json") as f:
+              data = json.load(f)
+
+          metadata = data.get("Metadata") or {}
+          os_info = metadata.get("OS") or {}
+          repo_digests = metadata.get("RepoDigests") or []
+          image_digest = ""
+          if repo_digests and "@" in repo_digests[0]:
+              image_digest = repo_digests[0].split("@", 1)[1]
+
+          def pick_cvss(cvss_data):
+              if not cvss_data:
+                  return None
+              for vendor in ("nvd", "redhat", "ghsa"):
+                  v = cvss_data.get(vendor)
+                  if v:
+                      score = v.get("V3Score") or v.get("V2Score")
+                      if score is not None:
+                          return float(score)
+              first = next(iter(cvss_data.values()), None) or {}
+              score = first.get("V3Score") or first.get("V2Score")
+              return float(score) if score is not None else None
+
+          scan_time = datetime.datetime.utcnow().replace(microsecond=0)
+          rows = []
+          for result in (data.get("Results") or []):
+              target = result.get("Target", "")
+              cls = result.get("Class", "")
+              pkg_type = result.get("Type", "")
+              for v in (result.get("Vulnerabilities") or []):
+                  fixed = v.get("FixedVersion") or ""
+                  rows.append((
+                      scan_time,
+                      registry,
+                      image_name,
+                      image_tag,
+                      image_full,
+                      image_digest,
+                      os_info.get("Family", ""),
+                      os_info.get("Name", ""),
+                      target,
+                      cls,
+                      pkg_type,
+                      v.get("VulnerabilityID", ""),
+                      v.get("PkgName", ""),
+                      v.get("InstalledVersion", ""),
+                      fixed,
+                      bool(fixed),
+                      v.get("Severity", ""),
+                      (v.get("Title") or "")[:2000],
+                      v.get("PrimaryURL", ""),
+                      pick_cvss(v.get("CVSS")),
+                      gh_repo,
+                      gh_run,
+                      gh_sha,
+                  ))
+
+          print(f"Connecting to Trino at {h}:{port} as {user}")
+          conn = connect(
+              host=h,
+              port=port,
+              http_scheme="https",
+              user=user,
+              auth=BasicAuthentication(user, password),
+              catalog=catalog,
+              schema=schema,
+          )
+          cur = conn.cursor()
+
+          fq = f'"{catalog}"."{schema}"."{table}"'
+          cur.execute(f"""
+          CREATE TABLE IF NOT EXISTS {fq} (
+            scan_time TIMESTAMP,
+            registry VARCHAR,
+            image_name VARCHAR,
+            image_tag VARCHAR,
+            image_full VARCHAR,
+            image_digest VARCHAR,
+            os_family VARCHAR,
+            os_name VARCHAR,
+            target VARCHAR,
+            class VARCHAR,
+            pkg_type VARCHAR,
+            vulnerability_id VARCHAR,
+            pkg_name VARCHAR,
+            installed_version VARCHAR,
+            fixed_version VARCHAR,
+            fix_available BOOLEAN,
+            severity VARCHAR,
+            title VARCHAR,
+            primary_url VARCHAR,
+            cvss_score DOUBLE,
+            github_repository VARCHAR,
+            github_run_id VARCHAR,
+            github_sha VARCHAR
+          )
+          """)
+          cur.fetchall()
+
+          if not rows:
+              print("No vulnerabilities found; recording a single scan-marker row")
+              rows = [(
+                  scan_time, registry, image_name, image_tag, image_full, image_digest,
+                  os_info.get("Family", ""), os_info.get("Name", ""), "", "", "",
+                  "", "", "", "", False, "NONE", "", "", None,
+                  gh_repo, gh_run, gh_sha,
+              )]
+
+          def lit(v):
+              if v is None:
+                  return "NULL"
+              if isinstance(v, bool):
+                  return "TRUE" if v else "FALSE"
+              if isinstance(v, (int, float)):
+                  return repr(v)
+              if isinstance(v, datetime.datetime):
+                  return f"TIMESTAMP '{v.isoformat(sep=' ', timespec='seconds')}'"
+              s = str(v).replace("'", "''")
+              return f"'{s}'"
+
+          cols = (
+              "scan_time, registry, image_name, image_tag, image_full, image_digest, "
+              "os_family, os_name, target, class, pkg_type, vulnerability_id, pkg_name, "
+              "installed_version, fixed_version, fix_available, severity, title, "
+              "primary_url, cvss_score, github_repository, github_run_id, github_sha"
+          )
+
+          BATCH = 200
+          total = 0
+          for i in range(0, len(rows), BATCH):
+              chunk = rows[i:i + BATCH]
+              values = ", ".join("(" + ", ".join(lit(c) for c in r) + ")" for r in chunk)
+              cur.execute(f"INSERT INTO {fq} ({cols}) VALUES {values}")
+              cur.fetchall()
+              total += len(chunk)
+          print(f"✅ Inserted {total} rows into {catalog}.{schema}.{table}")
+          PY
+
+      - name: Enforce severity gate (HIGH/CRITICAL)
+        if: always() && hashFiles('trivy-out/trivy.json') != ''
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          with open("trivy-out/trivy.json") as f:
+              data = json.load(f)
+          bad = []
+          for r in (data.get("Results") or []):
+              for v in (r.get("Vulnerabilities") or []):
+                  if v.get("Severity") in ("HIGH", "CRITICAL"):
+                      bad.append((v.get("Severity"), v.get("VulnerabilityID"), v.get("PkgName")))
+          if bad:
+              print(f"❌ Found {len(bad)} HIGH/CRITICAL vulnerabilities")
+              for sev, vid, pkg in bad[:50]:
+                  print(f"  {sev}: {vid} in {pkg}")
+              sys.exit(1)
+          print("✅ No HIGH/CRITICAL vulnerabilities")
+          PY
 
       - name: Logout
         if: always()
