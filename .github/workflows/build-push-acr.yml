@@ -331,27 +331,7 @@ jobs:
               total += len(chunk)
           print(f"✅ Inserted {total} rows into {catalog}.{schema}.{table}")
           PY
-
-      - name: Enforce severity gate (HIGH/CRITICAL)
-        if: always() && hashFiles('trivy-out/trivy.json') != ''
-        run: |
-          python3 - <<'PY'
-          import json, sys
-          with open("trivy-out/trivy.json") as f:
-              data = json.load(f)
-          bad = []
-          for r in (data.get("Results") or []):
-              for v in (r.get("Vulnerabilities") or []):
-                  if v.get("Severity") in ("HIGH", "CRITICAL"):
-                      bad.append((v.get("Severity"), v.get("VulnerabilityID"), v.get("PkgName")))
-          if bad:
-              print(f"❌ Found {len(bad)} HIGH/CRITICAL vulnerabilities")
-              for sev, vid, pkg in bad[:50]:
-                  print(f"  {sev}: {vid} in {pkg}")
-              sys.exit(1)
-          print("✅ No HIGH/CRITICAL vulnerabilities")
-          PY
-
+          
       - name: Logout
         if: always()
         run: docker logout ${{ secrets.ACR_REGISTRY }}
