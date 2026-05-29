@@ -1,0 +1,387 @@
+name: Build and Push Utility Images to ACR
+
+on:
+  workflow_dispatch:
+    inputs:
+      images:
+        description: |
+          JSON array of build definitions.
+
+          Each item must contain:
+            - path  → "<repo>/<folder>" (repo to checkout + folder containing Dockerfile)
+            - image → image name
+            - tag   → image tag
+
+          Example:
+          [
+            {"path":"nx1-utility-images/jupyterhub","image":"jupyterhub","tag":"4.0.2"},
+            {"path":"nx1-utility-images/spark","image":"spark","tag":"3.5.1"}
+          ]
+        required: true
+        type: string
+
+jobs:
+  build-push-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    strategy:
+      matrix:
+        include: ${{ fromJson(inputs.images) }}
+      fail-fast: false
+
+    steps:
+      # -----------------------------
+      # 1. Cleanup runner
+      # -----------------------------
+      - name: Free disk space
+        run: |
+          echo "Before cleanup:"
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache || true
+          sudo docker system prune -af || true
+          echo "After cleanup:"
+          df -h
+
+      # -----------------------------
+      # 2. Parse path → repo + folder
+      # -----------------------------
+      - name: Parse path
+        id: parse
+        run: |
+          set -euo pipefail
+          RAW_PATH="${{ matrix.path }}"
+          # strip trailing slash
+          RAW_PATH="${RAW_PATH%/}"
+          # first segment = repo, rest = folder inside that repo
+          REPO="${RAW_PATH%%/*}"
+          FOLDER="${RAW_PATH#*/}"
+          if [ "$REPO" = "$FOLDER" ]; then
+            echo "❌ path must be in form '<repo>/<folder>', got: $RAW_PATH"
+            exit 1
+          fi
+          echo "REPO=$REPO"   >> "$GITHUB_OUTPUT"
+          echo "FOLDER=$FOLDER" >> "$GITHUB_OUTPUT"
+          echo "Parsed repo  : $REPO"
+          echo "Parsed folder: $FOLDER"
+
+      # -----------------------------
+      # 3. Checkout the target repo
+      # -----------------------------
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/${{ steps.parse.outputs.REPO }}
+          token: ${{ secrets.GH_PAT }}
+          path: src
+
+      # -----------------------------
+      # 4. Validate input
+      # -----------------------------
+      - name: Validate input
+        run: |
+          BUILD_CTX="src/${{ steps.parse.outputs.FOLDER }}"
+          echo "Repo       : ${{ steps.parse.outputs.REPO }}"
+          echo "Folder     : ${{ steps.parse.outputs.FOLDER }}"
+          echo "Image      : ${{ matrix.image }}"
+          echo "Tag        : ${{ matrix.tag }}"
+          echo "Build ctx  : $BUILD_CTX"
+
+          if [ -z "${{ matrix.path }}" ] || \
+             [ -z "${{ matrix.image }}" ] || \
+             [ -z "${{ matrix.tag }}" ]; then
+            echo "❌ Missing required fields"
+            exit 1
+          fi
+          if [ ! -d "$BUILD_CTX" ]; then
+            echo "❌ Build context does not exist: $BUILD_CTX"
+            exit 1
+          fi
+          if [ ! -f "$BUILD_CTX/Dockerfile" ]; then
+            echo "❌ Dockerfile not found at: $BUILD_CTX/Dockerfile"
+            exit 1
+          fi
+
+      # -----------------------------
+      # 5. Login to ACR
+      # -----------------------------
+      - name: Login to ACR
+        run: |
+          echo "${{ secrets.ACR_PASSWORD }}" | docker login ${{ secrets.ACR_REGISTRY }} \
+            -u "${{ secrets.ACR_USERNAME }}" --password-stdin
+
+      # -----------------------------
+      # 6. Build image
+      # -----------------------------
+      - name: Build Docker image
+        run: |
+          IMAGE="${{ secrets.ACR_REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}"
+          BUILD_CTX="src/${{ steps.parse.outputs.FOLDER }}"
+
+          echo "Building: $IMAGE"
+          echo "Context : $BUILD_CTX"
+
+          docker build -t "$IMAGE" "$BUILD_CTX"
+
+      # -----------------------------
+      # 7. Push image
+      # -----------------------------
+      - name: Push image to ACR
+        run: |
+          IMAGE="${{ secrets.ACR_REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}"
+          echo "Pushing: $IMAGE"
+          docker push "$IMAGE"
+
+      # -----------------------------
+      # 8. Trivy scan (JSON + table)
+      # -----------------------------
+      - name: Trivy vulnerability scan
+        run: |
+          IMAGE="${{ secrets.ACR_REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}"
+          echo "🔍 Running Trivy scan on: $IMAGE"
+          mkdir -p trivy-out
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $HOME/.cache/trivy:/root/.cache/ \
+            -v "$PWD/trivy-out":/out \
+            aquasec/trivy:0.69.1 image "$IMAGE" \
+            --timeout 20m \
+            --exit-code 0 \
+            --severity LOW,MEDIUM,HIGH,CRITICAL \
+            --format json \
+            --output /out/trivy.json
+          echo "📄 Rendering table view for the log:"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $HOME/.cache/trivy:/root/.cache/ \
+            aquasec/trivy:0.69.1 image "$IMAGE" \
+            --timeout 20m \
+            --exit-code 0 \
+            --severity HIGH,CRITICAL \
+            --format table || true
+
+      # -----------------------------
+      # 9. Upload Trivy results to Trino
+      # -----------------------------
+      - name: Upload Trivy results to Trino
+        if: always()
+        continue-on-error: true
+        env:
+          TRINO_HOST: ${{ secrets.TRINO_HOST }}
+          TRINO_USER: ${{ secrets.TRINO_USER }}
+          TRINO_PASSWORD: ${{ secrets.TRINO_PASSWORD }}
+          TRINO_CATALOG: ${{ secrets.TRINO_CATALOG }}
+          TRINO_SCHEMA: ${{ secrets.TRINO_SCHEMA }}
+          TRINO_TABLE: ${{ secrets.TRINO_TABLE }}
+          IMAGE_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_TAG: ${{ matrix.tag }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_SHA: ${{ github.sha }}
+          SRC_REPO: ${{ steps.parse.outputs.REPO }}
+          SRC_FOLDER: ${{ steps.parse.outputs.FOLDER }}
+        run: |
+          set -euo pipefail
+          if [ ! -s trivy-out/trivy.json ]; then
+            echo "::warning::trivy-out/trivy.json missing or empty; skipping Trino upload"
+            exit 0
+          fi
+          missing=0
+          for v in TRINO_HOST TRINO_USER TRINO_PASSWORD TRINO_CATALOG TRINO_SCHEMA TRINO_TABLE; do
+            if [ -z "${!v:-}" ]; then
+              echo "::warning::$v is not set; skipping Trino upload"
+              missing=1
+            fi
+          done
+          [ "$missing" = "1" ] && exit 0
+          python3 -m pip install --quiet 'trino==0.328.0'
+          python3 - <<'PY'
+          import datetime, json, os, sys
+          from trino.dbapi import connect
+          from trino.auth import BasicAuthentication
+
+          host = os.environ["TRINO_HOST"]
+          if ":" in host:
+              h, port_s = host.rsplit(":", 1)
+              port = int(port_s)
+          else:
+              h, port = host, 443
+
+          user = os.environ["TRINO_USER"]
+          password = os.environ["TRINO_PASSWORD"]
+          catalog = os.environ["TRINO_CATALOG"]
+          schema = os.environ["TRINO_SCHEMA"]
+          table = os.environ["TRINO_TABLE"]
+
+          registry = os.environ["IMAGE_REGISTRY"]
+          image_name = os.environ["IMAGE_NAME"]
+          image_tag = os.environ["IMAGE_TAG"]
+          image_full = f"{registry}/{image_name}:{image_tag}"
+          gh_repo = os.environ.get("GH_REPOSITORY", "")
+          gh_run = os.environ.get("GH_RUN_ID", "")
+          gh_sha = os.environ.get("GH_SHA", "")
+          src_repo = os.environ.get("SRC_REPO", "")
+          src_folder = os.environ.get("SRC_FOLDER", "")
+
+          with open("trivy-out/trivy.json") as f:
+              data = json.load(f)
+
+          metadata = data.get("Metadata") or {}
+          os_info = metadata.get("OS") or {}
+          repo_digests = metadata.get("RepoDigests") or []
+          image_digest = ""
+          if repo_digests and "@" in repo_digests[0]:
+              image_digest = repo_digests[0].split("@", 1)[1]
+
+          def pick_cvss(cvss_data):
+              if not cvss_data:
+                  return None
+              for vendor in ("nvd", "redhat", "ghsa"):
+                  v = cvss_data.get(vendor)
+                  if v:
+                      score = v.get("V3Score") or v.get("V2Score")
+                      if score is not None:
+                          return float(score)
+              first = next(iter(cvss_data.values()), None) or {}
+              score = first.get("V3Score") or first.get("V2Score")
+              return float(score) if score is not None else None
+
+          scan_time = datetime.datetime.utcnow().replace(microsecond=0)
+          rows = []
+          for result in (data.get("Results") or []):
+              target = result.get("Target", "")
+              cls = result.get("Class", "")
+              pkg_type = result.get("Type", "")
+              for v in (result.get("Vulnerabilities") or []):
+                  fixed = v.get("FixedVersion") or ""
+                  rows.append((
+                      scan_time,
+                      registry,
+                      image_name,
+                      image_tag,
+                      image_full,
+                      image_digest,
+                      os_info.get("Family", ""),
+                      os_info.get("Name", ""),
+                      target,
+                      cls,
+                      pkg_type,
+                      v.get("VulnerabilityID", ""),
+                      v.get("PkgName", ""),
+                      v.get("InstalledVersion", ""),
+                      fixed,
+                      bool(fixed),
+                      v.get("Severity", ""),
+                      (v.get("Title") or "")[:2000],
+                      v.get("PrimaryURL", ""),
+                      pick_cvss(v.get("CVSS")),
+                      gh_repo,
+                      gh_run,
+                      gh_sha,
+                      src_repo,
+                      src_folder,
+                  ))
+
+          print(f"Connecting to Trino at {h}:{port} as {user}")
+          conn = connect(
+              host=h,
+              port=port,
+              http_scheme="https",
+              user=user,
+              auth=BasicAuthentication(user, password),
+              catalog=catalog,
+              schema=schema,
+          )
+          cur = conn.cursor()
+
+          fq = f'"{catalog}"."{schema}"."{table}"'
+          cur.execute(f"""
+          CREATE TABLE IF NOT EXISTS {fq} (
+            scan_time TIMESTAMP,
+            registry VARCHAR,
+            image_name VARCHAR,
+            image_tag VARCHAR,
+            image_full VARCHAR,
+            image_digest VARCHAR,
+            os_family VARCHAR,
+            os_name VARCHAR,
+            target VARCHAR,
+            class VARCHAR,
+            pkg_type VARCHAR,
+            vulnerability_id VARCHAR,
+            pkg_name VARCHAR,
+            installed_version VARCHAR,
+            fixed_version VARCHAR,
+            fix_available BOOLEAN,
+            severity VARCHAR,
+            title VARCHAR,
+            primary_url VARCHAR,
+            cvss_score DOUBLE,
+            github_repository VARCHAR,
+            github_run_id VARCHAR,
+            github_sha VARCHAR,
+            source_repo VARCHAR,
+            source_folder VARCHAR
+          )
+          """)
+          cur.fetchall()
+
+          if not rows:
+              print("No vulnerabilities found; recording a single scan-marker row")
+              rows = [(
+                  scan_time, registry, image_name, image_tag, image_full, image_digest,
+                  os_info.get("Family", ""), os_info.get("Name", ""), "", "", "",
+                  "", "", "", "", False, "NONE", "", "", None,
+                  gh_repo, gh_run, gh_sha, src_repo, src_folder,
+              )]
+
+          def lit(v):
+              if v is None:
+                  return "NULL"
+              if isinstance(v, bool):
+                  return "TRUE" if v else "FALSE"
+              if isinstance(v, (int, float)):
+                  return repr(v)
+              if isinstance(v, datetime.datetime):
+                  return f"TIMESTAMP '{v.isoformat(sep=' ', timespec='seconds')}'"
+              s = str(v).replace("'", "''")
+              return f"'{s}'"
+
+          cols = (
+              "scan_time, registry, image_name, image_tag, image_full, image_digest, "
+              "os_family, os_name, target, class, pkg_type, vulnerability_id, pkg_name, "
+              "installed_version, fixed_version, fix_available, severity, title, "
+              "primary_url, cvss_score, github_repository, github_run_id, github_sha, "
+              "source_repo, source_folder"
+          )
+
+          BATCH = 200
+          total = 0
+          for i in range(0, len(rows), BATCH):
+              chunk = rows[i:i + BATCH]
+              values = ", ".join("(" + ", ".join(lit(c) for c in r) + ")" for r in chunk)
+              cur.execute(f"INSERT INTO {fq} ({cols}) VALUES {values}")
+              cur.fetchall()
+              total += len(chunk)
+          print(f"✅ Inserted {total} rows into {catalog}.{schema}.{table}")
+          PY
+
+      # -----------------------------
+      # 10. Summary
+      # -----------------------------
+      - name: Summary
+        run: |
+          echo "✅ Build + Push + Scan + Trino upload completed"
+          echo "Source repo  : ${{ steps.parse.outputs.REPO }}"
+          echo "Source folder: ${{ steps.parse.outputs.FOLDER }}"
+          echo "Image        : ${{ matrix.image }}"
+          echo "Tag          : ${{ matrix.tag }}"
+          echo "ACR          : ${{ secrets.ACR_REGISTRY }}"
+
+      # -----------------------------
+      # 11. Logout
+      # -----------------------------
+      - name: Logout
+        if: always()
+        run: docker logout ${{ secrets.ACR_REGISTRY }}
