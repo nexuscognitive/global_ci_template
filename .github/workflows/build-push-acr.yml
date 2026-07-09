@@ -32,6 +32,9 @@ on:
         required: false
       TRINO_TABLE:
         required: false
+      GH_PAT:
+        required: false
+      
 
 jobs:
   build-and-push:
@@ -86,10 +89,13 @@ jobs:
             --password-stdin
 
       - name: Build image
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
           echo "Building image: $IMAGE"
           docker build \
+            --secret id=GH_PAT,env=GH_PAT \
             -f ${{ matrix.image.dockerfile }} \
             -t $IMAGE \
             ${{ matrix.image.context }}
