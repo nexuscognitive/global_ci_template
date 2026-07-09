@@ -89,6 +89,8 @@ jobs:
             --password-stdin
 
       - name: Build image
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
           echo "Building image: $IMAGE"
