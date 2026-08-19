@@ -91,10 +91,25 @@ jobs:
       - name: Build image
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
+          # Optional per-image "KEY=VALUE" list. For images that do not set it this is
+          # the literal string "null", and no --build-arg is added.
+          BUILD_ARGS_JSON: ${{ toJson(matrix.image.build_args) }}
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
           echo "Building image: $IMAGE"
+
+          BUILD_ARGS=()
+          if [ "$BUILD_ARGS_JSON" != "null" ]; then
+            while IFS= read -r kv; do
+              [ -n "$kv" ] || continue
+              echo "  --build-arg $kv"
+              BUILD_ARGS+=(--build-arg "$kv")
+            done < <(jq -r '.[]' <<<"$BUILD_ARGS_JSON")
+          fi
+
+          # ${BUILD_ARGS[@]+...} keeps an empty array safe if the shell runs with `set -u`.
           docker build \
+            ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
             --secret id=GH_PAT,env=GH_PAT \
             -f ${{ matrix.image.dockerfile }} \
             -t $IMAGE \
@@ -118,6 +133,19 @@ jobs:
           echo "Pushing image: $IMAGE"
           docker push $IMAGE
 
+      # Trivy exports the whole uncompressed image before analysing it. Images that carry
+      # a Spark distribution are large enough that this filled the runner's root disk and
+      # failed the scan -- which also skips the severity gate below, so a scan that cannot
+      # run silently stops gating anything. Reclaim the build cache (the tagged image is
+      # kept) and give Trivy its temp space on /mnt, which is the runner's big volume.
+      - name: Reclaim disk before scan
+        run: |
+          echo "Before:"; df -h / /mnt || true
+          docker builder prune -af || true
+          docker image prune -f || true
+          sudo mkdir -p /mnt/trivy-tmp && sudo chmod 1777 /mnt/trivy-tmp
+          echo "After:"; df -h / /mnt || true
+
       - name: Trivy vulnerability scan
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
@@ -126,6 +154,7 @@ jobs:
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v $HOME/.cache/trivy:/root/.cache/ \
+            -v /mnt/trivy-tmp:/tmp \
             -v "$PWD/trivy-out":/out \
             aquasec/trivy:0.69.1 image "$IMAGE" \
             --timeout 20m \
@@ -137,6 +166,7 @@ jobs:
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v $HOME/.cache/trivy:/root/.cache/ \
+            -v /mnt/trivy-tmp:/tmp \
             aquasec/trivy:0.69.1 image "$IMAGE" \
             --timeout 20m \
             --exit-code 0 \
