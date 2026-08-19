@@ -91,10 +91,25 @@ jobs:
       - name: Build image
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
+          # Optional per-image "KEY=VALUE" list. For images that do not set it this is
+          # the literal string "null", and no --build-arg is added.
+          BUILD_ARGS_JSON: ${{ toJson(matrix.image.build_args) }}
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
           echo "Building image: $IMAGE"
+
+          BUILD_ARGS=()
+          if [ "$BUILD_ARGS_JSON" != "null" ]; then
+            while IFS= read -r kv; do
+              [ -n "$kv" ] || continue
+              echo "  --build-arg $kv"
+              BUILD_ARGS+=(--build-arg "$kv")
+            done < <(jq -r '.[]' <<<"$BUILD_ARGS_JSON")
+          fi
+
+          # ${BUILD_ARGS[@]+...} keeps an empty array safe if the shell runs with `set -u`.
           docker build \
+            ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
             --secret id=GH_PAT,env=GH_PAT \
             -f ${{ matrix.image.dockerfile }} \
             -t $IMAGE \
