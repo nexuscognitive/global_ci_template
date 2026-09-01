@@ -16,11 +16,6 @@ on:
         description: 'GitHub App Client ID for token generation'
         required: false
         type: string
-      branch:
-        description: 'Target branch for updatecli PRs (defaults to main)'
-        required: false
-        type: string
-        default: 'main'
     secrets:
       app_private_key:
         description: 'GitHub App private key (.pem contents) for token generation'
@@ -43,5 +38,4 @@ jobs:
         env:
           UPDATECLI_GITHUB_APP_CLIENT_ID: ${{ inputs.client_id }}
           UPDATECLI_GITHUB_APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
-          UPDATECLI_BRANCH: ${{ inputs.branch }}
         run: updatecli apply --config ${{ inputs.manifest_path }}
