@@ -37,15 +37,8 @@ jobs:
         with:
           version: ${{ inputs.updatecli_version }}
 
-      - name: Generate app token
-        if: inputs.client_id && secrets.app_private_key
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ inputs.client_id }}
-          private-key: ${{ secrets.app_private_key }}
-
       - name: Run updatecli
         env:
-          UPDATECLI_GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.github_token || secrets.GITHUB_TOKEN }}
+          UPDATECLI_GITHUB_APP_CLIENT_ID: ${{ inputs.client_id }}
+          UPDATECLI_GITHUB_APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
         run: updatecli apply --config ${{ inputs.manifest_path }}
