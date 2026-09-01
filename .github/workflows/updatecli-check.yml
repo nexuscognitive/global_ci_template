@@ -20,9 +20,6 @@ on:
       app_private_key:
         description: 'GitHub App private key (.pem contents) for token generation'
         required: false
-      github_token:
-        description: 'Optional fallback GitHub token; uses GITHUB_TOKEN if not provided'
-        required: false
 
 jobs:
   updatecli-apply:
