@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: updatecli/updatecli-action@v2
+      - uses: updatecli/updatecli-action@v3
         with:
           version: ${{ inputs.updatecli_version }}
 
