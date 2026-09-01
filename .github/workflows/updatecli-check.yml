@@ -1,0 +1,41 @@
+name: Updatecli version check
+
+on:
+  workflow_call:
+    inputs:
+      manifest_path:
+        description: 'Path to the updatecli manifest, relative to repo root'
+        required: true
+        type: string
+      updatecli_version:
+        description: 'updatecli CLI version to install'
+        required: false
+        default: 'v0.93.0'
+        type: string
+      client_id:
+        description: 'GitHub App Client ID for token generation'
+        required: false
+        type: string
+    secrets:
+      app_private_key:
+        description: 'GitHub App private key (.pem contents) for token generation'
+        required: false
+
+jobs:
+  updatecli-apply:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: updatecli/updatecli-action@v3
+        with:
+          version: ${{ inputs.updatecli_version }}
+
+      - name: Run updatecli
+        env:
+          UPDATECLI_GITHUB_APP_CLIENT_ID: ${{ inputs.client_id }}
+          UPDATECLI_GITHUB_APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+        run: updatecli apply --config ${{ inputs.manifest_path }}
