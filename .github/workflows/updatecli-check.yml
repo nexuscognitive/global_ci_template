@@ -12,8 +12,8 @@ on:
         required: false
         default: 'v0.93.0'
         type: string
-      app_id:
-        description: 'GitHub App ID for token generation'
+      client_id:
+        description: 'GitHub App Client ID for token generation'
         required: false
         type: string
     secrets:
@@ -38,11 +38,11 @@ jobs:
           version: ${{ inputs.updatecli_version }}
 
       - name: Generate app token
-        if: inputs.app_id && secrets.app_private_key
+        if: inputs.client_id && secrets.app_private_key
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ inputs.app_id }}
+          client-id: ${{ inputs.client_id }}
           private-key: ${{ secrets.app_private_key }}
 
       - name: Run updatecli
