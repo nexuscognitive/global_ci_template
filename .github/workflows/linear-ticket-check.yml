@@ -1,0 +1,124 @@
+name: Linear ticket check
+
+# Reusable PR gate: the head branch must contain a Linear issue key (PRD-123, ENG-4567, ...).
+#
+# Why the branch name and not the PR title or body: under squash-merge the PR title becomes
+# the commit subject, which conventional commits and release-please already own. The branch
+# name is parsed by nothing else, and Linear's own "copy git branch name" button produces
+# `<user>/prd-123-short-title`, so linking happens as a side effect of normal work.
+# See design decision 0005.
+#
+# The check name "Linear ticket" is a contract. Callers make it a required status check by
+# that exact name; renaming the job or its `name:` breaks every repo that requires it.
+#
+# ---------------------------------------------------------------------------------------
+# Caller example (.github/workflows/linear-ticket.yml in the consuming repo):
+#
+#   name: Linear ticket
+#
+#   on:
+#     pull_request:
+#       # `edited` is what re-runs the check after a branch rename or base change;
+#       # `synchronize` covers new pushes. Do not drop either.
+#       types: [opened, edited, synchronize, reopened]
+#
+#   permissions: {}
+#
+#   jobs:
+#     linear-ticket:
+#       uses: nexuscognitive/global_ci_template/.github/workflows/linear-ticket-check.yml@main
+#       # Optional. Comma-separated bot logins that never carry a key. Overrides the default.
+#       # with:
+#       #   exempt_actors: 'nx1-release-bot[bot],dependabot[bot],nx1-updatecli[bot]'
+#
+# Note that the caller's *job id* does not matter for the required-check name; the check is
+# reported as "Linear ticket" from the job inside this file.
+# ---------------------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      exempt_actors:
+        description: >-
+          Comma-separated GitHub logins whose PRs skip the check. Matched against both
+          `github.actor` (who triggered this run) and the PR author, so a bot-authored PR
+          stays exempt when a human edits its title. Defaults to the org's automation Apps.
+          Prefer this over a ruleset bypass actor: bypass skips *every* rule, this skips one.
+        required: false
+        type: string
+        # nx1-release-bot[bot]: release-please App (PRD-1142). nx1-updatecli[bot]: the
+        # installed `nx1-updatecli` GitHub App (login is <app-slug>[bot]).
+        default: 'nx1-release-bot[bot],dependabot[bot],nx1-updatecli[bot]'
+
+jobs:
+  linear-ticket:
+    name: Linear ticket
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Check head branch for a Linear issue key
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          ACTOR: ${{ github.actor }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          EXEMPT_ACTORS: ${{ inputs.exempt_actors }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          # 1. Exemptions: automation that authors PRs with no ticket (release PRs, dependency
+          #    bumps). Identity is the actor or the PR author; never a branch-name prefix.
+          IFS=',' read -r -a EXEMPT <<<"$EXEMPT_ACTORS"
+          for who in "${EXEMPT[@]}"; do
+            who="${who// /}"
+            [ -n "$who" ] || continue
+            if [ "$who" = "$ACTOR" ] || [ "$who" = "$PR_AUTHOR" ]; then
+              echo "::notice title=Linear ticket::Skipped -- '$who' is an exempt actor (actor='$ACTOR', author='$PR_AUTHOR')."
+              exit 0
+            fi
+          done
+
+          if [ -z "$HEAD_REF" ]; then
+            echo "::error title=Linear ticket::github.head_ref is empty (event '$EVENT_NAME')." \
+                 "This workflow must be called from a pull_request event; see the caller example in the workflow file."
+            exit 1
+          fi
+
+          # 2. The key. Generic on purpose: any Linear team prefix, not a hardcoded list, so a
+          #    new team's first PR is not an org-wide merge outage. Linear keys are upper-case
+          #    (PRD-123) but Linear's "copy git branch name" button lower-cases them
+          #    (blake/prd-123-title), so the match is case-insensitive.
+          KEY_RE='[A-Za-z][A-Za-z0-9]+-[0-9]+'
+
+          if KEY="$(grep -Eo -m1 "$KEY_RE" <<<"$HEAD_REF" | head -n1)" && [ -n "$KEY" ]; then
+            echo "::notice title=Linear ticket::Branch '$HEAD_REF' references ${KEY^^}."
+            exit 0
+          fi
+
+          echo "::error title=Linear ticket::Branch '$HEAD_REF' does not contain a Linear issue key."
+          cat <<MSG
+          ::group::How to fix
+          Every PR must trace to a Linear ticket, and the ticket key must be in the *branch name*
+          (not the PR title -- that becomes the commit message under squash-merge).
+
+          Expected a key like PRD-123 or eng-4567 anywhere in the branch name, e.g.
+              feat/PRD-123-short-description
+              blake/prd-123-short-description
+
+          Fix, either:
+            a) In Linear, open the issue and use "Copy git branch name" (Cmd/Ctrl+Shift+.),
+               then:  git checkout -b <pasted-name> && git push -u origin <pasted-name>
+               and open a new PR from that branch (or retarget this one).
+            b) Rename this branch to include the key:
+                 git branch -m $HEAD_REF <new-name-with-KEY-123>
+                 git push origin -u <new-name-with-KEY-123> && git push origin --delete $HEAD_REF
+               GitHub moves the open PR to the renamed branch when you rename it in the
+               repository's Branches page instead; if the check does not re-run afterwards,
+               close and reopen the PR.
+
+          Bot-authored PRs are exempt by identity (exempt_actors input); do not work around
+          this by adding a fake key.
+          ::endgroup::
+          MSG
+          exit 1
