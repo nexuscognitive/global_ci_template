@@ -1,9 +1,22 @@
 name: Build & Push Image with trivy scan on Tag (ACR)
 
+# Release builds only ever come from a strict semver git tag, vX.Y.Z. The `resolve-version`
+# job below is the single place that validates the ref and derives the container tag from
+# it (the leading `v` is stripped: v3.4.0 -> 3.4.0). Every image built by this workflow is
+# tagged from that one output, optionally suffixed with a per-image build variant
+# (3.4.0-spark3). See design decision 0003 (versioning and tag scheme).
+
 on:
   workflow_call:
     inputs:
       images:
+        description: >-
+          JSON array of images to build. Each entry takes "name", "dockerfile" and
+          "context", an optional "build_args" list of "KEY=VALUE" strings, and an
+          optional "variant". When "variant" is set the container tag becomes
+          <version>-<variant> (e.g. 3.4.0-spark3); without it the tag is just <version>.
+          The variant never appears in the git tag or the release -- a repo has one
+          version, its containers may have several tags.
         required: true
         type: string
       lfs:
@@ -19,6 +32,19 @@ on:
         required: false
         default: 60
         type: number
+    outputs:
+      release:
+        description: '"true" when the run was triggered by a vX.Y.Z tag and built release images.'
+        value: ${{ jobs.resolve-version.outputs.release }}
+      version:
+        description: 'Semver version with the leading v stripped (3.4.0). Empty for non-release builds.'
+        value: ${{ jobs.resolve-version.outputs.version }}
+      container_tag:
+        description: >-
+          Base container tag every image in this run was tagged with, before any per-image
+          variant suffix. Callers that build extra images outside the template must use
+          this rather than re-deriving a tag from GITHUB_REF.
+        value: ${{ jobs.resolve-version.outputs.container_tag }}
     secrets:
       ACR_REGISTRY:
         required: true
@@ -42,10 +68,71 @@ on:
         required: false
       GH_PAT:
         required: false
-      
 
 jobs:
+  # Runs once, before any image job, and is the only thing allowed to decide what the
+  # container tag is. The build matrix consumes its outputs; nothing downstream reads
+  # GITHUB_REF directly.
+  resolve-version:
+    name: Resolve version from ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.ref.outputs.release }}
+      version: ${{ steps.ref.outputs.version }}
+      container_tag: ${{ steps.ref.outputs.container_tag }}
+    steps:
+      # Why a regex guard here and not just `on: push: tags: ['v[0-9]+.[0-9]+.[0-9]+']` in
+      # the caller: GitHub's tag filters are globs, not regexes. In a glob `+` is a literal
+      # plus sign and `.` matches a literal dot only, so that pattern matches the tag
+      # `v1+.2+.3+` and not `v1.2.3`. Callers can (and should) narrow their trigger with a
+      # glob such as `v[0-9]*.[0-9]*.[0-9]*`, but a glob cannot express "digits only, exactly
+      # three groups, nothing after". This step can, and because it lives in the reusable
+      # workflow every consumer inherits it in one change.
+      #
+      # Strict on purpose: no pre-release or build-metadata suffix. `v1.2.3-rc1` and
+      # `v0.0.1-test` are rejected, because semver sorts a pre-release *below* its release
+      # and updatecli's `versionfilter: semver` would treat them as older than what tenants
+      # already run. Non-release builds get their own tag scheme (sha-<short>, pr-<n>) and
+      # are the only other thing allowed past this guard.
+      - name: Guard - release builds only from vX.Y.Z tags
+        id: ref
+        env:
+          REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          # Canonical release-tag pattern. Group 1 is the version without the `v`.
+          SEMVER_TAG_RE='^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$'
+
+          if [[ "$REF" =~ $SEMVER_TAG_RE ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+            {
+              echo "release=true"
+              echo "version=$VERSION"
+              echo "container_tag=$VERSION"
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice title=Release build::$REF -> container tag $VERSION"
+            exit 0
+          fi
+
+          # Not a release. Nothing else is allowed to build yet; preview builds
+          # (sha-<short>, pr-<n>) plug in here as the release=false path.
+          echo "release=false" >> "$GITHUB_OUTPUT"
+          if [[ "$REF" == refs/tags/* ]]; then
+            echo "::error title=Refusing to build::Tag '${REF#refs/tags/}' is not a release tag." \
+                 "Release images are built only from tags matching vX.Y.Z (e.g. v3.4.0)." \
+                 "Tags are cut by release-please; do not push tags by hand." \
+                 "Legacy or experimental tags produce no image."
+          else
+            echo "::error title=Refusing to build::Event '$EVENT' on '$REF' is not a release tag push." \
+                 "This workflow currently builds only from vX.Y.Z tags."
+          fi
+          exit 1
+
   build-and-push:
+    needs: resolve-version
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
 
@@ -70,10 +157,19 @@ jobs:
         with:
           lfs: ${{ inputs.lfs }}
 
-      - name: Extract tag
-        id: meta
+      # The one place the per-image tag is assembled: <container_tag>[-<variant>].
+      # Every later step refers to steps.image.outputs.TAG and never to GITHUB_REF.
+      - name: Compute container tag
+        id: image
+        env:
+          BASE_TAG: ${{ needs.resolve-version.outputs.container_tag }}
+          VARIANT: ${{ matrix.image.variant }}
         run: |
-          echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          [ -n "$BASE_TAG" ] || { echo "::error::resolve-version produced no container_tag"; exit 1; }
+          TAG="${BASE_TAG}${VARIANT:+-$VARIANT}"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Container tag for ${{ matrix.image.name }}: $TAG"
 
       - name: Debug secrets presence (safe)
         env:
@@ -103,7 +199,7 @@ jobs:
           # the literal string "null", and no --build-arg is added.
           BUILD_ARGS_JSON: ${{ toJson(matrix.image.build_args) }}
         run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.image.outputs.TAG }}
           echo "Building image: $IMAGE"
 
           BUILD_ARGS=()
@@ -128,7 +224,7 @@ jobs:
 
       - name: Squash image
         run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.image.outputs.TAG }}
           echo "Size before squash:"
           docker image inspect "$IMAGE" --format '{{.Size}}' | numfmt --to=iec
           docker-squash -t "$IMAGE" "$IMAGE"
@@ -137,7 +233,7 @@ jobs:
 
       - name: Push image
         run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.image.outputs.TAG }}
           echo "Pushing image: $IMAGE"
           docker push $IMAGE
 
@@ -156,7 +252,7 @@ jobs:
 
       - name: Trivy vulnerability scan
         run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.image.outputs.TAG }}
           echo "🔍 Running Trivy scan on: $IMAGE"
           mkdir -p trivy-out
           docker run --rm \
@@ -193,7 +289,7 @@ jobs:
           TRINO_TABLE: ${{ secrets.TRINO_TABLE }}
           IMAGE_REGISTRY: ${{ secrets.ACR_REGISTRY }}
           IMAGE_NAME: ${{ matrix.image.name }}
-          IMAGE_TAG: ${{ steps.meta.outputs.TAG }}
+          IMAGE_TAG: ${{ steps.image.outputs.TAG }}
           GH_REPOSITORY: ${{ github.repository }}
           GH_RUN_ID: ${{ github.run_id }}
           GH_SHA: ${{ github.sha }}
