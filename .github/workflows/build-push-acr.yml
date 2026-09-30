@@ -1,11 +1,5 @@
 name: Build & Push Image with trivy scan on Tag (ACR)
 
-# Release builds only ever come from a strict semver git tag, vX.Y.Z. The `resolve-version`
-# job below is the single place that validates the ref and derives the container tag from
-# it (the leading `v` is stripped: v3.4.0 -> 3.4.0). Every image built by this workflow is
-# tagged from that one output, optionally suffixed with a per-image build variant
-# (3.4.0-spark3). See design decision 0003 (versioning and tag scheme).
-
 on:
   workflow_call:
     inputs:
@@ -77,9 +71,6 @@ on:
         required: false
 
 jobs:
-  # Runs once, before any image job, and is the only thing allowed to decide what the
-  # container tag is. The build matrix consumes its outputs; nothing downstream reads
-  # GITHUB_REF directly.
   resolve-version:
     name: Resolve version from ref
     runs-on: ubuntu-latest
@@ -89,19 +80,6 @@ jobs:
       version: ${{ steps.ref.outputs.version }}
       container_tag: ${{ steps.ref.outputs.container_tag }}
     steps:
-      # Why a regex guard here and not just `on: push: tags: ['v[0-9]+.[0-9]+.[0-9]+']` in
-      # the caller: GitHub's tag filters are globs, not regexes. In a glob `+` is a literal
-      # plus sign and `.` matches a literal dot only, so that pattern matches the tag
-      # `v1+.2+.3+` and not `v1.2.3`. Callers can (and should) narrow their trigger with a
-      # glob such as `v[0-9]*.[0-9]*.[0-9]*`, but a glob cannot express "digits only, exactly
-      # three groups, nothing after". This step can, and because it lives in the reusable
-      # workflow every consumer inherits it in one change.
-      #
-      # Strict on purpose: no pre-release or build-metadata suffix. `v1.2.3-rc1` and
-      # `v0.0.1-test` are rejected, because semver sorts a pre-release *below* its release
-      # and updatecli's `versionfilter: semver` would treat them as older than what tenants
-      # already run. Non-release builds get their own tag scheme (sha-<short>, pr-<n>) and
-      # are the only other thing allowed past this guard.
       - name: Guard - release builds only from vX.Y.Z tags
         id: ref
         env:
@@ -110,7 +88,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Canonical release-tag pattern. Group 1 is the version without the `v`.
           SEMVER_TAG_RE='^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$'
 
           if [[ "$REF" =~ $SEMVER_TAG_RE ]]; then
@@ -124,8 +101,6 @@ jobs:
             exit 0
           fi
 
-          # Not a release. Nothing else is allowed to build yet; preview builds
-          # (sha-<short>, pr-<n>) plug in here as the release=false path.
           echo "release=false" >> "$GITHUB_OUTPUT"
           if [[ "$REF" == refs/tags/* ]]; then
             echo "::error title=Refusing to build::Tag '${REF#refs/tags/}' is not a release tag." \
@@ -164,8 +139,6 @@ jobs:
         with:
           lfs: ${{ inputs.lfs }}
 
-      # The one place the per-image tag is assembled: <container_tag>[-<variant>].
-      # Every later step refers to steps.image.outputs.TAG and never to GITHUB_REF.
       - name: Compute container tag
         id: image
         env:
@@ -202,8 +175,6 @@ jobs:
       - name: Build image
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-          # Optional per-image "KEY=VALUE" list. For images that do not set it this is
-          # the literal string "null", and no --build-arg is added.
           BUILD_ARGS_JSON: ${{ toJson(matrix.image.build_args) }}
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.image.outputs.TAG }}
@@ -218,7 +189,6 @@ jobs:
             done < <(jq -r '.[]' <<<"$BUILD_ARGS_JSON")
           fi
 
-          # ${BUILD_ARGS[@]+...} keeps an empty array safe if the shell runs with `set -u`.
           docker build \
             ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
             --secret id=GH_PAT,env=GH_PAT \
@@ -245,11 +215,6 @@ jobs:
           echo "Pushing image: $IMAGE"
           docker push $IMAGE
 
-      # Trivy exports the whole uncompressed image before analysing it. Images that carry
-      # a Spark distribution are large enough that this filled the runner's root disk and
-      # failed the scan -- which also skips the severity gate below, so a scan that cannot
-      # run silently stops gating anything. Reclaim the build cache (the tagged image is
-      # kept) and give Trivy its temp space on /mnt, which is the runner's big volume.
       - name: Reclaim disk before scan
         run: |
           echo "Before:"; df -h / /mnt || true

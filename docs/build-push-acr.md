@@ -163,6 +163,22 @@ jobs:
   the build.
 - **The image is pushed before it is scanned.**
 
+## Design notes
+
+- **Why a regex guard instead of only a tag filter in the caller.** GitHub tag filters are
+  globs, not regexes, and cannot express "digits only, exactly three groups, nothing after".
+  The guard in `resolve-version` can, and every tenant inherits it from this one place. The
+  caller's glob is just a pre-filter.
+- **Why pre-release tags are rejected.** Semver sorts `v1.2.3-rc1` below `v1.2.3`, so tools that
+  use a semver version filter (such as updatecli) would treat it as older than what tenants
+  already run. Non-release builds (`sha-<short>`, `pr-<n>`) are not supported yet.
+- **Single source of the tag.** `resolve-version` is the only place the container tag is
+  decided, and the build steps never read `GITHUB_REF`.
+- **Disk reclaim before the scan.** Trivy exports the whole uncompressed image. Large images
+  (for example a Spark distribution) filled the runner's root disk and failed the scan, which
+  also skips the severity gate. The workflow prunes the build cache and gives Trivy its temp
+  space on `/mnt`, the runner's large volume.
+
 ## Troubleshooting
 
 | Symptom | Cause |
