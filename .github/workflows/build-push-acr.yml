@@ -32,6 +32,13 @@ on:
         required: false
         default: 60
         type: number
+      push_image:
+        description: >-
+          Push the built image to ACR. Set to false for dry runs (build, squash and scan
+          only) so test runs do not populate the registry.
+        required: false
+        default: true
+        type: boolean
     outputs:
       release:
         description: '"true" when the run was triggered by a vX.Y.Z tag and built release images.'
@@ -232,6 +239,7 @@ jobs:
           docker image inspect "$IMAGE" --format '{{.Size}}' | numfmt --to=iec
 
       - name: Push image
+        if: ${{ inputs.push_image }}
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.image.outputs.TAG }}
           echo "Pushing image: $IMAGE"
