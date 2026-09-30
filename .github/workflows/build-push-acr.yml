@@ -4,6 +4,13 @@ on:
   workflow_call:
     inputs:
       images:
+        description: >-
+          JSON array of images to build. Each entry takes "name", "dockerfile" and
+          "context", an optional "build_args" list of "KEY=VALUE" strings, and an
+          optional "variant". When "variant" is set the container tag becomes
+          <version>-<variant> (e.g. 3.4.0-spark3); without it the tag is just <version>.
+          The variant never appears in the git tag or the release -- a repo has one
+          version, its containers may have several tags.
         required: true
         type: string
       lfs:
@@ -19,6 +26,26 @@ on:
         required: false
         default: 60
         type: number
+      push_image:
+        description: >-
+          Push the built image to ACR. Set to false for dry runs (build, squash and scan
+          only) so test runs do not populate the registry.
+        required: false
+        default: true
+        type: boolean
+    outputs:
+      release:
+        description: '"true" when the run was triggered by a vX.Y.Z tag and built release images.'
+        value: ${{ jobs.resolve-version.outputs.release }}
+      version:
+        description: 'Semver version with the leading v stripped (3.4.0). Empty for non-release builds.'
+        value: ${{ jobs.resolve-version.outputs.version }}
+      container_tag:
+        description: >-
+          Base container tag every image in this run was tagged with, before any per-image
+          variant suffix. Callers that build extra images outside the template must use
+          this rather than re-deriving a tag from GITHUB_REF.
+        value: ${{ jobs.resolve-version.outputs.container_tag }}
     secrets:
       ACR_REGISTRY:
         required: true
@@ -42,10 +69,52 @@ on:
         required: false
       GH_PAT:
         required: false
-      
 
 jobs:
+  resolve-version:
+    name: Resolve version from ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.ref.outputs.release }}
+      version: ${{ steps.ref.outputs.version }}
+      container_tag: ${{ steps.ref.outputs.container_tag }}
+    steps:
+      - name: Guard - release builds only from vX.Y.Z tags
+        id: ref
+        env:
+          REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          SEMVER_TAG_RE='^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$'
+
+          if [[ "$REF" =~ $SEMVER_TAG_RE ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+            {
+              echo "release=true"
+              echo "version=$VERSION"
+              echo "container_tag=$VERSION"
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice title=Release build::$REF -> container tag $VERSION"
+            exit 0
+          fi
+
+          echo "release=false" >> "$GITHUB_OUTPUT"
+          if [[ "$REF" == refs/tags/* ]]; then
+            echo "::error title=Refusing to build::Tag '${REF#refs/tags/}' is not a release tag." \
+                 "Release images are built only from tags matching vX.Y.Z (e.g. v3.4.0)." \
+                 "Tags are cut by release-please; do not push tags by hand." \
+                 "Legacy or experimental tags produce no image."
+          else
+            echo "::error title=Refusing to build::Event '$EVENT' on '$REF' is not a release tag push." \
+                 "This workflow currently builds only from vX.Y.Z tags."
+          fi
+          exit 1
+
   build-and-push:
+    needs: resolve-version
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
 
@@ -70,10 +139,17 @@ jobs:
         with:
           lfs: ${{ inputs.lfs }}
 
-      - name: Extract tag
-        id: meta
+      - name: Compute container tag
+        id: image
+        env:
+          BASE_TAG: ${{ needs.resolve-version.outputs.container_tag }}
+          VARIANT: ${{ matrix.image.variant }}
         run: |
-          echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          [ -n "$BASE_TAG" ] || { echo "::error::resolve-version produced no container_tag"; exit 1; }
+          TAG="${BASE_TAG}${VARIANT:+-$VARIANT}"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Container tag for ${{ matrix.image.name }}: $TAG"
 
       - name: Debug secrets presence (safe)
         env:
@@ -99,11 +175,9 @@ jobs:
       - name: Build image
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-          # Optional per-image "KEY=VALUE" list. For images that do not set it this is
-          # the literal string "null", and no --build-arg is added.
           BUILD_ARGS_JSON: ${{ toJson(matrix.image.build_args) }}
         run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.image.outputs.TAG }}
           echo "Building image: $IMAGE"
 
           BUILD_ARGS=()
@@ -115,7 +189,6 @@ jobs:
             done < <(jq -r '.[]' <<<"$BUILD_ARGS_JSON")
           fi
 
-          # ${BUILD_ARGS[@]+...} keeps an empty array safe if the shell runs with `set -u`.
           docker build \
             ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
             --secret id=GH_PAT,env=GH_PAT \
@@ -128,7 +201,7 @@ jobs:
 
       - name: Squash image
         run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.image.outputs.TAG }}
           echo "Size before squash:"
           docker image inspect "$IMAGE" --format '{{.Size}}' | numfmt --to=iec
           docker-squash -t "$IMAGE" "$IMAGE"
@@ -136,16 +209,12 @@ jobs:
           docker image inspect "$IMAGE" --format '{{.Size}}' | numfmt --to=iec
 
       - name: Push image
+        if: ${{ inputs.push_image }}
         run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.image.outputs.TAG }}
           echo "Pushing image: $IMAGE"
           docker push $IMAGE
 
-      # Trivy exports the whole uncompressed image before analysing it. Images that carry
-      # a Spark distribution are large enough that this filled the runner's root disk and
-      # failed the scan -- which also skips the severity gate below, so a scan that cannot
-      # run silently stops gating anything. Reclaim the build cache (the tagged image is
-      # kept) and give Trivy its temp space on /mnt, which is the runner's big volume.
       - name: Reclaim disk before scan
         run: |
           echo "Before:"; df -h / /mnt || true
@@ -156,7 +225,7 @@ jobs:
 
       - name: Trivy vulnerability scan
         run: |
-          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
+          IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.image.outputs.TAG }}
           echo "🔍 Running Trivy scan on: $IMAGE"
           mkdir -p trivy-out
           docker run --rm \
@@ -193,7 +262,7 @@ jobs:
           TRINO_TABLE: ${{ secrets.TRINO_TABLE }}
           IMAGE_REGISTRY: ${{ secrets.ACR_REGISTRY }}
           IMAGE_NAME: ${{ matrix.image.name }}
-          IMAGE_TAG: ${{ steps.meta.outputs.TAG }}
+          IMAGE_TAG: ${{ steps.image.outputs.TAG }}
           GH_REPOSITORY: ${{ github.repository }}
           GH_RUN_ID: ${{ github.run_id }}
           GH_SHA: ${{ github.sha }}
