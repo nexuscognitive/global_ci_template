@@ -77,19 +77,6 @@ jobs:
               --username "${{ secrets.ACR_USERNAME }}" \
               --password-stdin
 
-      - name: Login to Docker Hardened Images (dhi.io)
-        # Optional: mirroring dhi.io/... images needs a Docker Hub account.
-        # Skipped when the secrets aren't set, so other images are unaffected.
-        env:
-          DHI_USERNAME: ${{ secrets.DHI_USERNAME }}
-          DHI_TOKEN: ${{ secrets.DHI_TOKEN }}
-        run: |
-          if [ -z "$DHI_USERNAME" ] || [ -z "$DHI_TOKEN" ]; then
-            echo "DHI_USERNAME/DHI_TOKEN not set; skipping dhi.io login"
-            exit 0
-          fi
-          echo "$DHI_TOKEN" | docker login dhi.io --username "$DHI_USERNAME" --password-stdin
-
       - name: Pull public image
         run: |
           echo "Pulling: ${{ steps.resolve.outputs.source }}"
