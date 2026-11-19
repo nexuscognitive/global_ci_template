@@ -51,7 +51,9 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.timeout_minutes }}
+    # workflow_dispatch hands number inputs over as strings, which timeout-minutes
+    # rejects; fromJSON turns either form back into a number.
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes || 60) }}
 
     steps:
       - name: Free disk space
