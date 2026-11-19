@@ -45,6 +45,9 @@ on:
       TRINO_TABLE:
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   scan:
     runs-on: ubuntu-latest
