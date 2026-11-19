@@ -162,7 +162,7 @@ jobs:
             -v "$HOME/.cache/trivy":/root/.cache/ \
             -v /mnt/trivy-tmp:/tmp \
             -v "$PWD/trivy-out":/out \
-            aquasec/trivy:0.69.1 image "$IMAGE" \
+            aquasec/trivy:0.76.2 image "$IMAGE" \
             --timeout 20m \
             --exit-code 0 \
             --severity LOW,MEDIUM,HIGH,CRITICAL \
@@ -173,7 +173,7 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$HOME/.cache/trivy":/root/.cache/ \
             -v /mnt/trivy-tmp:/tmp \
-            aquasec/trivy:0.69.1 image "$IMAGE" \
+            aquasec/trivy:0.76.2 image "$IMAGE" \
             --timeout 20m \
             --exit-code 0 \
             --severity HIGH,CRITICAL \
