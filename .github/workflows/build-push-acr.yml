@@ -42,6 +42,11 @@ on:
         required: false
       GH_PAT:
         required: false
+      # Optional Docker Hardened Images (dhi.io) credentials, for Dockerfiles that build FROM dhi.io/...
+      DHI_USERNAME:
+        required: false
+      DHI_TOKEN:
+        required: false
       
 
 jobs:
@@ -50,6 +55,8 @@ jobs:
     timeout-minutes: ${{ inputs.timeout_minutes }}
 
     strategy:
+      # One image failing must not cancel the rest of the matrix (mirror repos build ~20).
+      fail-fast: false
       matrix:
         image: ${{ fromJson(inputs.images) }}
 
@@ -108,6 +115,17 @@ jobs:
           docker login ${{ secrets.ACR_REGISTRY }} \
             --username ${{ secrets.ACR_USERNAME }} \
             --password-stdin
+
+      - name: Login to Docker Hardened Images (dhi.io)
+        env:
+          DHI_USERNAME: ${{ secrets.DHI_USERNAME }}
+          DHI_TOKEN: ${{ secrets.DHI_TOKEN }}
+        run: |
+          if [ -n "$DHI_USERNAME" ] && [ -n "$DHI_TOKEN" ]; then
+            echo "$DHI_TOKEN" | docker login dhi.io --username "$DHI_USERNAME" --password-stdin
+          else
+            echo "DHI credentials not provided; skipping dhi.io login"
+          fi
 
       - name: Build image
         env:
