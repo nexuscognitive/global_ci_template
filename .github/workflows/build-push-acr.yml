@@ -154,10 +154,16 @@ jobs:
             -t $IMAGE \
             ${{ matrix.image.context }}
 
+      # Optional per-image "squash": false skips the squash and pushes the image as built. The squash rewrites
+      # the whole image on the runner's root disk (export + re-import, ~3x the image size), which runs out of
+      # space for very large images (e.g. CUDA libraries plus a baked-in model). Default: squash.
+      # toJSON() is used because GitHub expressions treat null == false, so "!= false" would skip unset images.
       - name: Install docker-squash
+        if: toJSON(matrix.image.squash) != 'false'
         run: pip install docker-squash
 
       - name: Squash image
+        if: toJSON(matrix.image.squash) != 'false'
         run: |
           IMAGE=${{ secrets.ACR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.TAG }}
           echo "Size before squash:"
