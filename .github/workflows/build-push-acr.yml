@@ -42,6 +42,11 @@ on:
         required: false
       GH_PAT:
         required: false
+      # Optional Docker Hardened Images (dhi.io) credentials, for Dockerfiles that build FROM dhi.io/...
+      DHI_USERNAME:
+        required: false
+      DHI_TOKEN:
+        required: false
       
 
 jobs:
@@ -50,6 +55,8 @@ jobs:
     timeout-minutes: ${{ inputs.timeout_minutes }}
 
     strategy:
+      # One image failing must not cancel the rest of the matrix (mirror repos build ~20).
+      fail-fast: false
       matrix:
         image: ${{ fromJson(inputs.images) }}
 
@@ -72,8 +79,21 @@ jobs:
 
       - name: Extract tag
         id: meta
+        env:
+          # Optional per-image tag. Mirror/utility repos carry several images with their
+          # own upstream versions (postgres 17.2, nifi 2.11.0, ...), so one git tag can't
+          # name them all. Images without "tag" keep using the pushed git tag.
+          IMAGE_TAG_OVERRIDE: ${{ matrix.image.tag }}
         run: |
-          echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          if [ -n "$IMAGE_TAG_OVERRIDE" ]; then
+            TAG="$IMAGE_TAG_OVERRIDE"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            echo "::error::not a tag push and image ${{ matrix.image.name }} has no 'tag' field"; exit 1
+          fi
+          echo "Image tag: $TAG"
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
 
       - name: Debug secrets presence (safe)
         env:
@@ -95,6 +115,17 @@ jobs:
           docker login ${{ secrets.ACR_REGISTRY }} \
             --username ${{ secrets.ACR_USERNAME }} \
             --password-stdin
+
+      - name: Login to Docker Hardened Images (dhi.io)
+        env:
+          DHI_USERNAME: ${{ secrets.DHI_USERNAME }}
+          DHI_TOKEN: ${{ secrets.DHI_TOKEN }}
+        run: |
+          if [ -n "$DHI_USERNAME" ] && [ -n "$DHI_TOKEN" ]; then
+            echo "$DHI_TOKEN" | docker login dhi.io --username "$DHI_USERNAME" --password-stdin
+          else
+            echo "DHI credentials not provided; skipping dhi.io login"
+          fi
 
       - name: Build image
         env:
